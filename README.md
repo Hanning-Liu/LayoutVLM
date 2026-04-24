@@ -14,6 +14,15 @@
 ```bash
 pip install -r requirements.txt
 ```
+> Note: `bpy` (the Blender Python API) is **not** installable from PyPI via `pip`.
+> If you need Blender functionality, install Blender (3.6+) and run with Blender’s Python
+> (or ensure Blender’s bundled Python can import `bpy`).
+>
+> Quick sanity check (after installing Blender):
+>
+> ```bash
+> blender -b --python-expr "import bpy; print(bpy.app.version_string)"
+> ```
 3. Install Rotated IOU Loss (https://github.com/lilanxiao/Rotated\_IoU)
 ```
 cd third_party/Rotated_IoU/cuda_op
@@ -27,6 +36,18 @@ python setup.py install
 Refer to https://github.com/allenai/Holodeck and https://github.com/allenai/objathor for how we preprocess Objaverse assets.
 
 ## Usage
+
+Use the project Python environment (recommended: conda env `layoutvlm`, e.g. `conda activate layoutvlm` or `conda run -n layoutvlm python ...`).
+
+**Pick furniture UIDs from local metadata** (avoids random IDs that mismatch your task):
+
+```bash
+conda run -n layoutvlm python scripts/list_objaverse_assets.py --category sofa --on_floor
+conda run -n layoutvlm python scripts/list_objaverse_assets.py --category "coffee table" --on_floor
+conda run -n layoutvlm python scripts/list_objaverse_assets.py --category television --on_floor
+```
+
+Copy the printed `"<uid>-0": {}` lines into the `assets` section of your scene JSON. A ready-made example with sofa, coffee table, and television is at `examples/scene_living_room_sofa_tv.json`.
 
 1. Prepare a scene configuration JSON file of Objaverse assets with the following structure:
 ```json
@@ -54,7 +75,12 @@ Refer to https://github.com/allenai/Holodeck and https://github.com/allenai/obja
 
 2. Run LayoutVLM:
 ```bash
-python main.py --scene_json_file path/to/scene.json --openai_api_key your_api_key
+# DashScope (Aliyun Bailian) Qwen via OpenAI-compatible endpoint
+export DASHSCOPE_API_KEY="your_dashscope_api_key"
+export DASHSCOPE_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"  # optional (region-specific)
+
+conda run -n layoutvlm python main.py --scene_json_file examples/scene_living_room_sofa_tv.json --model qwen3.6-plus
+# or: python main.py --scene_json_file path/to/scene.json --model qwen3.6-plus
 ```
 
 ## Output

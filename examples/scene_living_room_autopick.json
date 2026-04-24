@@ -1,0 +1,34 @@
+{
+  "task_description": "A small living room with a sofa facing a television, and a coffee table between the sofa and the TV.",
+  "layout_criteria": "Place the television against a wall and orient the sofa so it faces the TV. Put the coffee table between the sofa and the TV with walking space on the sides. Keep a clear path through the room and avoid blocking door areas.",
+  "boundary": {
+    "floor_vertices": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        4,
+        0,
+        0
+      ],
+      [
+        4,
+        5,
+        0
+      ],
+      [
+        0,
+        5,
+        0
+      ]
+    ],
+    "wall_height": 2.6
+  },
+  "assets": {
+    "ea8211d1ba024cf68f3d013412fc790f-0": {},
+    "1dba4faab67641238035429debcf832f-0": {},
+    "bbf7a1c3ae0c4f0db45b923388d9f315-0": {}
+  }
+}

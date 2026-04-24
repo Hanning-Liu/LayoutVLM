@@ -1,0 +1,26 @@
+== Room precheck ==
+room_w=4.000m room_d=5.000m room_area=20.000m^2 room_min_dim=4.000m
+constraints: max_dim_ratio=0.8 min_dim_ratio=0.05 max_total_area_ratio=0.6
+
+== Picked for category='sofa' ==
+uid=ea8211d1ba024cf68f3d013412fc790f  meta_category='sofa'  bbox=(x=1.800,y=1.023,z=1.199)  area=1.841  onFloor=True  onWall=False  onObject=False
+Top alternatives:
+  score=-0.080  uid=ea8211d1ba024cf68f3d013412fc790f  cat='sofa'  bbox=(x=1.800,y=1.023,z=1.199)  area=1.841
+  score=-0.137  uid=10dfb3c26d6a4036a193803df1e3d987  cat='sofa'  bbox=(x=2.000,y=0.863,z=0.776)  area=1.726
+  score=-0.453  uid=f8def3c5f656454c935fe3d626ed9fab  cat='sofa'  bbox=(x=1.800,y=0.608,z=0.650)  area=1.094
+
+== Picked for category='coffee table' ==
+uid=1dba4faab67641238035429debcf832f  meta_category='coffee table'  bbox=(x=1.000,y=0.800,z=0.503)  area=0.800  onFloor=True  onWall=False  onObject=False
+Top alternatives:
+  score=-0.000  uid=1dba4faab67641238035429debcf832f  cat='coffee table'  bbox=(x=1.000,y=0.800,z=0.503)  area=0.800
+  score=-0.048  uid=706a1b0e23d34e60b0f8c9210ee85722  cat='coffee table'  bbox=(x=0.846,y=0.900,z=0.397)  area=0.762
+  score=-0.100  uid=c0ca8a15ad7045bdbdbb3ab1e1feee2a  cat='coffee table'  bbox=(x=1.200,y=0.600,z=0.363)  area=0.720
+
+== Picked for category='television' ==
+uid=bbf7a1c3ae0c4f0db45b923388d9f315  meta_category='television'  bbox=(x=1.220,y=0.270,z=0.762)  area=0.329  onFloor=True  onWall=True  onObject=False
+Top alternatives:
+  score=-0.177  uid=bbf7a1c3ae0c4f0db45b923388d9f315  cat='television'  bbox=(x=1.220,y=0.270,z=0.762)  area=0.329
+  score=-0.273  uid=936f166ede2f421aaa0df22835e6a798  cat='television'  bbox=(x=0.485,y=0.600,z=0.504)  area=0.291
+  score=-0.675  uid=581394a7714441d8a01bbd306c47ee49  cat='television'  bbox=(x=1.000,y=0.250,z=0.683)  area=0.250
+
+picked_total_footprint_area=2.970m^2 (14.9% of room)

@@ -1,0 +1,7 @@
+## Optional Blender/Python deps
+#
+# `bpy` (Blender Python API) is not installable via pip on Linux from PyPI.
+# To use `bpy`, install Blender (3.6+) and run LayoutVLM with Blender's bundled Python,
+# or configure your environment so that Blender's Python can import `bpy`.
+#
+# This file is intentionally not pip-installable as-is.
