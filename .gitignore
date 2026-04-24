@@ -1,2 +1,8 @@
 __pycache__
-./results/*
+results/
+objaverse_processed/
+assets.zip
+.env
+scene.json
+Untitled
+.DS_Store
