@@ -1,11 +1,9 @@
 import os
 import json
 import re
+import textwrap
 import numpy as np
 import torch
-from langchain_core.messages import HumanMessage
-from langchain_core.prompts import PromptTemplate
-from langchain_openai import ChatOpenAI
 from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation as R
 from .sandbox import SandBoxEnv
@@ -16,13 +14,22 @@ import base64
 import collections
 from utils.placement_utils import get_random_placement
 from prompts.layoutvlm import base_prompt
-from utils.blender_render import render_existing_scene
-from utils.blender_utils import reset_blender
+try:
+    # Rendering depends on Blender's `bpy` module. In many environments we run without Blender;
+    # treat rendering as optional and fall back to no-image mode.
+    from utils.blender_render import render_existing_scene
+    from utils.blender_utils import reset_blender
+    _BLENDER_AVAILABLE = True
+except Exception:
+    render_existing_scene = None
+    reset_blender = None
+    _BLENDER_AVAILABLE = False
 from collections import OrderedDict
 import prompts.layoutvlm.short_prompt as short_prompt
 import imageio
 from PIL import Image
 from utils.placement_utils import replace_z_rot_degree_to_rpy_radians
+from .qwen_dashscope_client import get_dashscope_client, chat_completions_text
 
 
 def extract_python_program(input_text):
@@ -49,9 +56,11 @@ class LayoutVLM:
         self.mode = mode
         self.asset_source = asset_source
         self.save_dir = save_dir
-        self.llm_slow = ChatOpenAI(model_name=gpt_4o_model_name, max_tokens=2048)
-        self.llm_slow_mini = ChatOpenAI(model_name="gpt-4o-mini", max_tokens=2048)
-        self.llm_slow_grouping = ChatOpenAI(model_name="gpt-4o", max_tokens=2048)
+        # DashScope (Aliyun Bailian) OpenAI-compatible client (see `test_dashscope_api.py`).
+        self._client = get_dashscope_client()
+        self.model_name = gpt_4o_model_name
+        self.model_name_mini = os.getenv("DASHSCOPE_MINI_MODEL", self.model_name)
+        self.model_name_grouping = os.getenv("DASHSCOPE_GROUPING_MODEL", self.model_name)
         self.visual_mark_mode = visual_mark_mode
         self.numerical_value_only = numerical_value_only
 
@@ -59,6 +68,17 @@ class LayoutVLM:
         self.ft_model_checkpoint = ft_model_checkpoint
         self.convert_z_rot_degree_to_rpy_radians = convert_z_rot_degree_to_rpy_radians
         self.max_place_remaining_retry = max_place_remaining_retry
+        self.blender_available = _BLENDER_AVAILABLE
+
+        # If Blender isn't available, ensure we don't attempt rendering paths.
+        if not self.blender_available and self.mode != "no_image":
+            print(
+                "Blender/bpy not available; switching to text-only mode (mode=no_image). "
+                "To enable image-conditioned layout, run in Blender's Python or ensure `import bpy` works."
+            )
+            self.mode = "no_image"
+        elif self.blender_available and self.mode != "no_image":
+            print("Blender rendering available; image-conditioned mode enabled.")
         
 
 
@@ -110,20 +130,26 @@ class LayoutVLM:
         prompt = prompt.replace("ASSET_LISTS", object_list)
         prompt = prompt.replace("TASK_DESCRIPTION", task["task_description"])
         prompt = prompt.replace("LAYOUT_CRITERIA", task["layout_criteria"])
-        
-        message = HumanMessage(
-            content=[
-                {"type": "text", "text": prompt},
-            ]
-        )
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            }
+        ]
 
         for attempt_idx in range(MAX_ATTEMPTS):
             try:
-                response = self.llm_slow_grouping.invoke([message])
+                response_text = chat_completions_text(
+                    client=self._client,
+                    model=self.model_name_grouping,
+                    messages=messages,
+                    max_tokens=2048,
+                    temperature=0.0,
+                )
                 if save_dir is not None:
                     with open(f"{save_dir}/grouping_{attempt_idx}.txt", "w") as f:
-                        f.write(prompt + "\n\n" + response.content)
-                matches = extract_json(response.content)
+                        f.write(prompt + "\n\n" + response_text)
+                matches = extract_json(response_text)
                 result = json.loads(matches[-1])
                 return result["list"]
             except Exception as e:
@@ -133,23 +159,22 @@ class LayoutVLM:
 
     def get_initialization(self, final_prompt, encoded_image=None):
         if encoded_image is None:
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": final_prompt},
-                ]
-            )
+            content = [{"type": "text", "text": final_prompt}]
         else:
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": final_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"},
-                    },
-                ]
-            )
-        response = self.llm_slow_mini.invoke([message])
-        response_text = response.content
+            content = [
+                {"type": "text", "text": final_prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"},
+                },
+            ]
+        response_text = chat_completions_text(
+            client=self._client,
+            model=self.model_name_mini,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=2048,
+            temperature=0.0,
+        )
         matches = extract_python_program(response_text)
         if matches:
             program = matches[0]
@@ -183,10 +208,10 @@ class LayoutVLM:
         
 
         messages = [
-            (
-                "system",
-                "You are a coding agent. PLEASE DO NOT REPEAT ANY OF THE CODE CODE GIVEN. DO NOT RE-INITIALIZE ANY OF THE GIVEN VARIABLES."
-            )
+            {
+                "role": "system",
+                "content": "You are a coding agent. PLEASE DO NOT REPEAT ANY OF THE CODE CODE GIVEN. DO NOT RE-INITIALIZE ANY OF THE GIVEN VARIABLES.",
+            }
         ]
         content = [{"type": "text", "text": final_prompt}]
 
@@ -198,10 +223,14 @@ class LayoutVLM:
                     "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"},
                 }
             )
-        message = HumanMessage(content=content)
-        messages.append(message)
-        response = self.llm_slow.invoke(messages)
-        response_text = response.content
+        messages.append({"role": "user", "content": content})
+        response_text = chat_completions_text(
+            client=self._client,
+            model=self.model_name,
+            messages=messages,
+            max_tokens=2048,
+            temperature=0.0,
+        )
         if self.convert_z_rot_degree_to_rpy_radians:
             response_text = replace_z_rot_degree_to_rpy_radians(response_text)
 
@@ -320,61 +349,69 @@ class LayoutVLM:
         #############################################################################
         current_scene_image_path_dict = {}
         if include_image:
-            if self.mode == "no_visual_coordinate":
-                output_images, visual_marks = render_existing_scene(
-                    placed_assets, task, save_dir=_save_dir,
-                    high_res=True, render_top_down=True,
-                    # For 3d front .obj
-                    apply_3dfront_texture=True, combine_obj_components=True,
-                    # this constant is used when generating training data. see front3d_v2.py
-                    fov_multiplier=1.3,
-                    # Disable all annotation flags
-                    add_coordinate_mark=False,
-                    annotate_object=True,
-                    annotate_wall=True,
-                    add_object_bbox=False
+            if not self.blender_available or render_existing_scene is None or reset_blender is None:
+                print(
+                    "Note: include_image=True but Blender rendering utilities are unavailable; "
+                    "skipping scene image rendering for this group."
                 )
-            elif self.mode == "no_visual_assetname":
-                output_images, visual_marks = render_existing_scene(
-                    placed_assets, task, save_dir=_save_dir,
-                    high_res=True, render_top_down=True,
-                    # For 3d front .obj
-                    apply_3dfront_texture=True, combine_obj_components=True,
-                    # this constant is used when generating training data. see front3d_v2.py
-                    fov_multiplier=1.3,
-                    # Disable all annotation flags
-                    add_coordinate_mark=True,
-                    annotate_object=False,
-                    annotate_wall=False,
-                    add_object_bbox=False
-                )
-            elif self.mode == "no_visual_mark":
-                output_images, visual_marks = render_existing_scene(
-                    placed_assets, task, save_dir=_save_dir,
-                    high_res=True, render_top_down=True,
-                    # For 3d front .obj
-                    apply_3dfront_texture=True, combine_obj_components=True,
-                    # this constant is used when generating training data. see front3d_v2.py
-                    fov_multiplier=1.3,
-                    # Disable all annotation flags
-                    add_coordinate_mark=False,
-                    annotate_object=False,
-                    annotate_wall=False,
-                    add_object_bbox=False
-                )
+                include_image = False
             else:
-                output_images, visual_marks = render_existing_scene(
-                    placed_assets, task, save_dir=_save_dir,
-                    high_res=True, render_top_down=True,
-                    # For 3d front .obj
-                    apply_3dfront_texture=True, combine_obj_components=True,
-                    # this constant is used when generating training data. see front3d_v2.py
-                    fov_multiplier=1.3
-                )
-            reset_blender()
-            ### render the incomplete scene with the visual marks
-            for _image in output_images:
-                current_scene_image_path_dict[os.path.basename(_image).split('.')[0]] = _image
+                if self.mode == "no_visual_coordinate":
+                    output_images, visual_marks = render_existing_scene(
+                        placed_assets, task, save_dir=_save_dir,
+                        high_res=True, render_top_down=True,
+                        # For 3d front .obj
+                        apply_3dfront_texture=True, combine_obj_components=True,
+                        # this constant is used when generating training data. see front3d_v2.py
+                        fov_multiplier=1.3,
+                        # Disable all annotation flags
+                        add_coordinate_mark=False,
+                        annotate_object=True,
+                        annotate_wall=True,
+                        add_object_bbox=False
+                    )
+                elif self.mode == "no_visual_assetname":
+                    output_images, visual_marks = render_existing_scene(
+                        placed_assets, task, save_dir=_save_dir,
+                        high_res=True, render_top_down=True,
+                        # For 3d front .obj
+                        apply_3dfront_texture=True, combine_obj_components=True,
+                        # this constant is used when generating training data. see front3d_v2.py
+                        fov_multiplier=1.3,
+                        # Disable all annotation flags
+                        add_coordinate_mark=True,
+                        annotate_object=False,
+                        annotate_wall=False,
+                        add_object_bbox=False
+                    )
+                elif self.mode == "no_visual_mark":
+                    output_images, visual_marks = render_existing_scene(
+                        placed_assets, task, save_dir=_save_dir,
+                        high_res=True, render_top_down=True,
+                        # For 3d front .obj
+                        apply_3dfront_texture=True, combine_obj_components=True,
+                        # this constant is used when generating training data. see front3d_v2.py
+                        fov_multiplier=1.3,
+                        # Disable all annotation flags
+                        add_coordinate_mark=False,
+                        annotate_object=False,
+                        annotate_wall=False,
+                        add_object_bbox=False
+                    )
+                else:
+                    output_images, visual_marks = render_existing_scene(
+                        placed_assets, task, save_dir=_save_dir,
+                        high_res=True, render_top_down=True,
+                        # For 3d front .obj
+                        apply_3dfront_texture=True, combine_obj_components=True,
+                        # this constant is used when generating training data. see front3d_v2.py
+                        fov_multiplier=1.3
+                    )
+
+                reset_blender()
+                ### render the incomplete scene with the visual marks
+                for _image in output_images:
+                    current_scene_image_path_dict[os.path.basename(_image).split('.')[0]] = _image
 
         #############################################################################
         ### prepare asset images (omitted)
@@ -446,6 +483,24 @@ class LayoutVLM:
                 # Perform replacement
                 for old_asset, new_asset in replacement_map.items():
                     constraint_program = constraint_program.replace(old_asset, new_asset)
+                # Some models return top-level code with leading indentation, which breaks `exec`.
+                # Normalize indentation without changing the relative indentation inside blocks.
+                constraint_program = textwrap.dedent(constraint_program).lstrip()
+
+                # Normalize instance references. The sandbox defines instances as `asset_var[idx]`,
+                # but some models emit `asset_var_idx` (e.g. `tv_console_0`).
+                try:
+                    asset_var_names = {a["asset_var_name"] for a in task.get("assets", {}).values() if "asset_var_name" in a}
+                    if asset_var_names:
+                        def _fix_instance_ref(m):
+                            base = m.group(1)
+                            idx = m.group(2)
+                            if base in asset_var_names:
+                                return f"{base}[{idx}]"
+                            return m.group(0)
+                        constraint_program = re.sub(r"\b([A-Za-z_]\w*)_(\d+)\b", _fix_instance_ref, constraint_program)
+                except Exception:
+                    pass
                 # print("AFTER")
                 # print(constraint_program)
                 #import pdb; pdb.set_trace()
@@ -607,12 +662,7 @@ class LayoutVLM:
         # print(final_prompt)
         with open(image_path, "rb") as image_file:
             encoded_image =  base64.b64encode(image_file.read()).decode('utf-8')
-        messages = [
-                (
-                    "system",
-                    "You are a coding agent."
-                )
-            ]
+        messages = [{"role": "system", "content": "You are a coding agent."}]
         content = [{"type": "text", "text": final_prompt}]
         
         content.append(
@@ -621,13 +671,17 @@ class LayoutVLM:
                 "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"},
             }
         )
-        message = HumanMessage(content=content)
-        messages.append(message)
+        messages.append({"role": "user", "content": content})
 
         for attempt_idx in range(3):
             try:
-                response = self.llm_slow_mini.invoke(messages)
-                response_text = response.content
+                response_text = chat_completions_text(
+                    client=self._client,
+                    model=self.model_name_mini,
+                    messages=messages,
+                    max_tokens=2048,
+                    temperature=0.0,
+                )
                 
                 # print(response_text)
                 # with open(save_path, "w") as f:
