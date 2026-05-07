@@ -12,6 +12,14 @@ def parse_args():
     p.add_argument("--asset_dir", default="./objaverse_processed")
     p.add_argument("--out_dir", default="./results/render")
     p.add_argument("--no_gif", action="store_true", help="Skip GIF stitching.")
+    p.add_argument(
+        "--gif-animate-views",
+        action="store_true",
+        help=(
+            "If multiple PNGs are rendered, also write render.gif that animates between them. "
+            "Default is off: top-down and side views stay as separate stills."
+        ),
+    )
     # Blender passes its own flags in sys.argv; user args come after `--`.
     argv = sys.argv
     if "--" in argv:
@@ -141,7 +149,7 @@ def main():
     # Import only inside Blender.
     from utils.blender_render import render_existing_scene
 
-    output_images, _ = render_existing_scene(
+    output_images, _, annotations = render_existing_scene(
         placed_assets=placed_assets,
         task=task,
         save_dir=args.out_dir,
@@ -151,6 +159,32 @@ def main():
         annotate_object=True,
         annotate_wall=True,
     )
+
+    from utils.annotation_serialize import serialize_annotation_for_json
+
+    meta_path = os.path.join(args.out_dir, "_render_postprocess.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "output_images": list(output_images),
+                "annotations": [serialize_annotation_for_json(a) for a in annotations],
+            },
+            f,
+            indent=2,
+        )
+
+    try:
+        from utils.image_annotate import apply_annotations
+
+        apply_annotations(annotations)
+    except ImportError:
+        print(
+            "Note: Pillow not available in this Blender Python; PNGs are raw renders "
+            "without text/grid overlays. After Blender exits, run in conda:\n"
+            f"  python {os.path.join(repo_root, 'scripts', 'postprocess_blender_render.py')} "
+            f"--out_dir {args.out_dir}\n"
+            "(Annotates each view in-place; optional GIF: add --gif-animate-views.)"
+        )
 
     print("Rendered:")
     for p in output_images:
@@ -167,12 +201,29 @@ def main():
         for p in output_images:
             if p.lower().endswith((".png", ".jpg", ".jpeg")) and os.path.exists(p):
                 frames.append(imageio.imread(p))
-        if frames:
-            gif_path = os.path.join(args.out_dir, "render.gif")
-            imageio.mimsave(gif_path, frames, duration=0.8)
-            print("Saved GIF:", gif_path)
+        if not frames:
+            return
+        if len(frames) == 1:
+            print("Single rendered image; not writing render.gif (use the PNG).")
+            return
+        if not args.gif_animate_views:
+            print(
+                "Multiple camera views rendered; not writing render.gif by default "
+                "(each view is a separate still). Re-run with --gif-animate-views to "
+                "force one animated GIF, or use postprocess_blender_render.py --gif-animate-views."
+            )
+            return
+        gif_path = os.path.join(args.out_dir, "render.gif")
+        imageio.mimsave(gif_path, frames, duration=0.8)
+        print("Saved GIF:", gif_path)
     except Exception as e:
-        print("Skipping GIF stitching:", e)
+        print("Skipping GIF stitching in Blender:", e)
+        print(
+            "To apply overlays in conda, run:\n"
+            f"  python {os.path.join(repo_root, 'scripts', 'postprocess_blender_render.py')} "
+            f"--out_dir {args.out_dir}\n"
+            "Optional slideshow GIF across all PNGs: add --gif-animate-views to that command."
+        )
 
 
 if __name__ == "__main__":
