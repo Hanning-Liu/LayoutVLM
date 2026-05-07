@@ -6,9 +6,6 @@ import math
 import numpy as np
 import os
 import bpy
-import numpy as np
-from scipy.signal import correlate2d
-from scipy.ndimage import shift
 import json
 from mathutils import Vector
 
@@ -332,72 +329,91 @@ def add_material(obj, path_texture, add_uv=False, material_pos=-1, texture_scale
             obj.data.materials[material_pos] = new_material
 
 
-def load_hdri(hdri_path='./data/HDRIs/studio_small_08_4k.exr', hdri_strength=1, hide=True):  # Replace with the correct path
-    # Path to the HDRI file
-    # Ensure this path is correct and points to the 'meadow_4k.exr' file on your system
+def load_hdri(hdri_path=None, hdri_strength=1, hide=True):
+    """
+    Optional world HDRI. Search order:
+    1) $LAYOUTVLM_HDRI (absolute or user path)
+    2) explicit ``hdri_path`` relative to repo root if not absolute
+    3) <repo>/data/HDRIs/studio_small_08_4k.exr
+    If none exist, skip quietly (scene still uses other lights / white world).
+    """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    candidates = []
+    env_hdri = os.environ.get("LAYOUTVLM_HDRI")
+    if env_hdri:
+        candidates.append(os.path.expanduser(env_hdri.strip()))
+    if hdri_path:
+        p = hdri_path.strip()
+        if not os.path.isabs(p):
+            p = os.path.normpath(os.path.join(repo_root, p.lstrip("./\\")))
+        candidates.append(p)
+    candidates.append(os.path.join(repo_root, "data", "HDRIs", "studio_small_08_4k.exr"))
 
-    if not os.path.exists(hdri_path):
-        current_file = os.path.abspath(__file__)
-        hdri_path = os.path.join(os.path.dirname(os.path.dirname(current_file)), hdri_path)
+    resolved = None
+    for p in candidates:
+        if p and os.path.isfile(p):
+            resolved = p
+            break
 
-    # Check if the file exists
-    if not os.path.exists(hdri_path):
-        print("HDRI file not found:", hdri_path)
+    if resolved is None:
+        print(
+            "HDRI file not found (optional). Set LAYOUTVLM_HDRI to a .exr path, "
+            "or place data/HDRIs/studio_small_08_4k.exr under the repo; continuing without HDRI."
+        )
+        return
+
+    hdri_path = resolved
+
+    # Get the world
+    world = bpy.data.worlds['World']  # Replace 'World' with your world name if different
+
+    # Enable nodes for the world
+    world.use_nodes = True
+    nodes = world.node_tree.nodes
+    links = world.node_tree.links
+
+    # Create a new Environment Texture node
+    env_texture = nodes.new(type='ShaderNodeTexEnvironment')
+
+    texture_coord = nodes.new(type="ShaderNodeTexCoord")
+    # create a new Mapping node
+    mapping_node = nodes.new(type='ShaderNodeMapping')
+
+    # Load the HDRI image
+    env_texture.image = bpy.data.images.load(hdri_path)
+
+    # Create a Background node
+    background = nodes.new(type='ShaderNodeBackground')
+    background.location = (-100, 0)
+
+    # Create a World Output node if it doesn't exist
+    if 'World Output' not in nodes:
+        world_output = nodes.new(type='ShaderNodeOutputWorld')
+        world_output.location = (100, 0)
     else:
-        # Get the world
-        world = bpy.data.worlds['World']  # Replace 'World' with your world name if different
+        world_output = nodes['World Output']
 
-        # Enable nodes for the world
-        world.use_nodes = True
-        nodes = world.node_tree.nodes
-        links = world.node_tree.links
+    if hide:
+        # Prevent HDRI from showing in the background
+        # Add a Light Path node and mix shader to control the visibility
+        light_path = nodes.new(type='ShaderNodeLightPath')
+        mix_shader = nodes.new(type='ShaderNodeMixShader')
+        bg_transparent = nodes.new(type='ShaderNodeBackground')
+        bg_transparent.inputs['Color'].default_value = (0, 0, 0, 1)  # Black, fully transparent
+        # Link the nodes to use Light Path for mixing
+        links.new(light_path.outputs['Is Camera Ray'], mix_shader.inputs['Fac'])
+        links.new(background.outputs['Background'], mix_shader.inputs[1])
+        links.new(bg_transparent.outputs['Background'], mix_shader.inputs[2])
+        links.new(mix_shader.outputs['Shader'], world_output.inputs['Surface'])
+    else:
+        links.new(background.outputs['Background'], world_output.inputs['Surface'])
 
-        # Clear existing nodes (optional, be careful with this)
-        # for node in nodes:
-        #     nodes.remove(node)
-
-        # Create a new Environment Texture node
-        env_texture = nodes.new(type='ShaderNodeTexEnvironment')
-
-        texture_coord = nodes.new(type="ShaderNodeTexCoord")
-        # create a new Mapping node
-        mapping_node = nodes.new(type='ShaderNodeMapping')
-
-        # Load the HDRI image
-        env_texture.image = bpy.data.images.load(hdri_path)
-
-        # Create a Background node
-        background = nodes.new(type='ShaderNodeBackground')
-        background.location = (-100, 0)
-
-        # Create a World Output node if it doesn't exist
-        if 'World Output' not in nodes:
-            world_output = nodes.new(type='ShaderNodeOutputWorld')
-            world_output.location = (100, 0)
-        else:
-            world_output = nodes['World Output']
-
-        if hide:
-            # Prevent HDRI from showing in the background
-            # Add a Light Path node and mix shader to control the visibility
-            light_path = nodes.new(type='ShaderNodeLightPath')
-            mix_shader = nodes.new(type='ShaderNodeMixShader')
-            bg_transparent = nodes.new(type='ShaderNodeBackground')
-            bg_transparent.inputs['Color'].default_value = (0, 0, 0, 1)  # Black, fully transparent
-            # Link the nodes to use Light Path for mixing
-            links.new(light_path.outputs['Is Camera Ray'], mix_shader.inputs['Fac'])
-            links.new(background.outputs['Background'], mix_shader.inputs[1])
-            links.new(bg_transparent.outputs['Background'], mix_shader.inputs[2])
-            links.new(mix_shader.outputs['Shader'], world_output.inputs['Surface'])
-        else:
-            links.new(background.outputs['Background'], world_output.inputs['Surface'])
-
-        # Link the nodes
-        links.new(texture_coord.outputs['Generated'], mapping_node.inputs['Vector'])
-        links.new(mapping_node.outputs['Vector'], env_texture.inputs['Vector'])
-        links.new(env_texture.outputs['Color'], background.inputs['Color'])
-        background.inputs['Strength'].default_value = hdri_strength
-        print("HDRI background set successfully.")
+    # Link the nodes
+    links.new(texture_coord.outputs['Generated'], mapping_node.inputs['Vector'])
+    links.new(mapping_node.outputs['Vector'], env_texture.inputs['Vector'])
+    links.new(env_texture.outputs['Color'], background.inputs['Color'])
+    background.inputs['Strength'].default_value = hdri_strength
+    print("HDRI background set successfully.")
 
 
 def setup_camera(center_x, center_y, width, wall_height=.1, wide_lens=False, fov_multiplier=1.1, use_damped_track=False):
@@ -468,9 +484,20 @@ def get_pixel_coordinates(scene, camera, world_coord):
     #)
 
 
+def _set_preferred_render_engine() -> None:
+    """Blender 4.x renamed Eevee to BLENDER_EEVEE_NEXT; older builds use BLENDER_EEVEE."""
+    render = bpy.context.scene.render
+    for engine in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", "CYCLES"):
+        try:
+            render.engine = engine
+            return
+        except TypeError:
+            continue
+
+
 def set_rendering_settings(panorama=False, high_res=False) -> None:
     render = bpy.context.scene.render
-    render.engine = 'BLENDER_EEVEE'
+    _set_preferred_render_engine()
     render.image_settings.file_format = "PNG"
     render.image_settings.color_mode = "RGBA"
 

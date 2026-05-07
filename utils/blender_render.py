@@ -2,22 +2,11 @@ import argparse, sys, os, math, re
 import bpy
 import bmesh
 from bpy_extras.image_utils import load_image
-import math
 import numpy as np
-import os
-import bpy
-import numpy as np
-from scipy.signal import correlate2d
-from scipy.ndimage import shift
-import json
 from mathutils import Vector
 from utils.blender_utils import reset_scene, setup_background, create_wall_mesh, add_material, setup_camera, load_hdri, set_rendering_settings, apply_texture_to_object
-import utils.transformations as tra
 from utils.colors import get_categorical_colors
-import trimesh
-import cv2
 from utils.blender_utils import get_pixel_coordinates, reset_blender
-from utils.plot_utils import annotate_image_with_coordinates
 
 
 def get_visual_marks(floor_vertices, scene, cam, interval=1):
@@ -172,6 +161,8 @@ def add_coordinate_frame(location=Vector((0, 0, 0.)), scale=1.0):
 
 
 def show_current_render(save_dir):
+    import cv2
+
     render_path = f"{save_dir}/tmp.png"
     bpy.context.scene.render.filepath = render_path
     bpy.ops.render.render(write_still=True)
@@ -179,6 +170,128 @@ def show_current_render(save_dir):
     cv2.imshow("render", img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
+
+def _compute_room_from_task(task):
+    """Floor polygon metrics from task['boundary']."""
+    floor_vertices = np.array(task["boundary"]["floor_vertices"])
+    floor_x_values = [point[0] for point in floor_vertices]
+    floor_y_values = [point[1] for point in floor_vertices]
+    floor_center_x = (max(floor_x_values) + min(floor_x_values)) / 2
+    floor_center_y = (max(floor_y_values) + min(floor_y_values)) / 2
+    floor_width = max(max(floor_x_values) - min(floor_x_values), max(floor_y_values) - min(floor_y_values))
+    wall_height = np.array(task["boundary"]["wall_height"]) if "wall_height" in task["boundary"] else 1
+    return {
+        "floor_vertices": floor_vertices,
+        "floor_center_x": floor_center_x,
+        "floor_center_y": floor_center_y,
+        "floor_width": floor_width,
+        "wall_height": wall_height,
+    }
+
+
+def _setup_floor_mesh(room, floor_material="Travertine008", adjust_top_down_angle=None):
+    """
+    Clear mesh objects, create floor from floor_vertices, material + UV unwrap.
+    Caller must have called reset_blender() and setup_background() first.
+    """
+    floor_vertices = room["floor_vertices"]
+    bpy.ops.object.select_all(action='DESELECT')
+    bpy.ops.object.select_by_type(type='MESH')
+    bpy.ops.object.delete()
+    bpy.context.window.scene = bpy.context.scene
+    bpy.context.view_layer.update()
+    floor_obj = create_wall_mesh("floor", floor_vertices)
+    if adjust_top_down_angle is not None:
+        floor_material = "Travertine008"
+    add_material(floor_obj, os.path.join("/viscam/projects/SceneAug/ambientcg", floor_material))
+    bpy.ops.object.select_all(action='DESELECT')
+    floor_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.uv.smart_project()
+    bpy.ops.object.mode_set(mode='OBJECT')
+    return floor_obj
+
+
+def _import_placed_asset_object(
+    instance_id,
+    asset,
+    placed_assets_entry,
+    *,
+    rotate_90=True,
+    recenter_mesh=True,
+    apply_3dfront_texture=False,
+    combine_obj_components=False,
+    bake_mesh_pose=True,
+):
+    """
+    Import one asset from disk. If bake_mesh_pose True, match render_existing_scene:
+    apply user rotation + transform_apply + world location. If False, leave mesh
+    at default orientation after -90° Z (for trajectory: set pose per frame later).
+    """
+    objects_before_import = set(bpy.context.scene.objects)
+    file_path = asset["path"]
+    if ".gltf" in file_path or ".glb" in file_path:
+        bpy.ops.import_scene.gltf(filepath=file_path)
+    elif ".obj" in file_path:
+        bpy.ops.wm.obj_import(filepath=file_path)
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}")
+
+    if not combine_obj_components:
+        loaded = bpy.context.view_layer.objects.active
+    else:
+        objects_after_import = set(bpy.context.scene.objects)
+        new_objects = objects_after_import - objects_before_import
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in new_objects:
+            obj.select_set(True)
+        try:
+            bpy.ops.object.join()
+        except Exception as e:
+            print(f"Error joining objects: {e}, ignoring the join operation")
+        loaded = bpy.context.view_layer.objects.active
+
+    if apply_3dfront_texture:
+        texture_path = os.path.join(os.path.split(file_path)[0], "texture.png")
+        if os.path.exists(texture_path):
+            apply_texture_to_object(loaded, texture_path)
+
+    bpy.ops.object.select_all(action='DESELECT')
+    loaded.select_set(True)
+    if recenter_mesh:
+        bpy.ops.object.origin_set(type='GEOMETRY_ORIGIN', center='BOUNDS')
+    if rotate_90:
+        bpy.ops.transform.rotate(value=-math.radians(90), orient_axis='Z')
+    bpy.context.object.rotation_mode = "XYZ"
+    if "scale" in placed_assets_entry:
+        loaded.scale = placed_assets_entry["scale"]
+
+    if bake_mesh_pose:
+        if isinstance(placed_assets_entry["rotation"], float):
+            loaded.rotation_euler[-1] += np.deg2rad(placed_assets_entry["rotation"])
+        else:
+            for i in range(3):
+                loaded.rotation_euler[i] += np.deg2rad(placed_assets_entry["rotation"][i])
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+        for i in range(3):
+            assert loaded.rotation_euler[i] == 0
+        xyz_location = placed_assets_entry["position"]
+        if len(xyz_location) == 2:
+            xyz_location = [
+                xyz_location[0],
+                xyz_location[1],
+                placed_assets_entry["scale"]
+                * placed_assets_entry["assetMetadata"]["boundingBox"]["z"]
+                / 2,
+            ]
+        loaded.location = xyz_location
+    else:
+        loaded.location = (0.0, 0.0, 0.0)
+        loaded.rotation_euler = (0.0, 0.0, 0.0)
+
+    return loaded
 
 
 def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_save_file=None, sideview_save_file=None, add_coordinate_mark=True,
@@ -208,7 +321,7 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
                                    If set to False, one example failure case is 0003d406-5f27-4bbf-94cd-1cff7c310ba1_LivingRoom-54780
     :param apply_3dfront_orientation_correction: 3d front .obj faces y axis by default, if we want to make it face x axis, set to True.
     :param ignore_asset_instance_idx: useful for generating object renderings for each group of objects
-    :return:
+    :return: (output_images, visual_marks, annotations) — annotations are deferred to Pillow outside Blender.
     """
 
     if add_object_bbox:
@@ -216,39 +329,13 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
 
     reset_blender()
     setup_background()
-    # compute scene boundary
-    floor_vertices = np.array(task["boundary"]["floor_vertices"])
-    floor_x_values = [point[0] for point in floor_vertices]
-    floor_y_values = [point[1] for point in floor_vertices]
-    floor_center_x = (max(floor_x_values) + min(floor_x_values)) / 2
-    floor_center_y = (max(floor_y_values) + min(floor_y_values)) / 2
-    floor_width = max(max(floor_x_values) - min(floor_x_values), max(floor_y_values) - min(floor_y_values))
-
-    wall_height = np.array(task["boundary"]["wall_height"]) if "wall_height" in task["boundary"] else 1
-    # Clear existing mesh objects and lights in the scene
-    bpy.ops.object.select_all(action='DESELECT')
-    bpy.ops.object.select_by_type(type='MESH')
-    bpy.ops.object.delete()
-    # Create a new empty scene
-    # Set the new empty scene as the active scene
-    bpy.context.window.scene = bpy.context.scene
-    # Update the user interface
-    bpy.context.view_layer.update()
-    # build floor and walls
-    # floor_obj = create_wall_mesh("floor", floor_vertices)
-    floor_obj = create_wall_mesh("floor", floor_vertices)
-    if adjust_top_down_angle is not None:
-        # asset centric rendreing
-        floor_material = "Travertine008"
-    add_material(floor_obj, os.path.join("/viscam/projects/SceneAug/ambientcg", floor_material))
-
-    bpy.ops.object.select_all(action='DESELECT')
-    floor_obj.select_set(True)
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    # Unwrap using Smart UV Project
-    bpy.ops.uv.smart_project()
-    bpy.ops.object.mode_set(mode='OBJECT')
+    room = _compute_room_from_task(task)
+    floor_vertices = room["floor_vertices"]
+    floor_center_x = room["floor_center_x"]
+    floor_center_y = room["floor_center_y"]
+    floor_width = room["floor_width"]
+    wall_height = room["wall_height"]
+    _setup_floor_mesh(room, floor_material=floor_material, adjust_top_down_angle=adjust_top_down_angle)
 
     if annotate_object:
         candidate_colors = get_categorical_colors(20, colormap_name='tab20', color_range="0-1", color_format="rgb")
@@ -258,66 +345,16 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
     for instance_id, asset in task["assets"].items():
         if instance_id not in placed_assets.keys():
             continue
-        objects_before_import = set(bpy.context.scene.objects)
-        file_path = asset["path"]
-        if ".gltf" in file_path or ".glb" in file_path:
-            bpy.ops.import_scene.gltf(filepath=file_path)
-        elif ".obj" in file_path:
-            bpy.ops.wm.obj_import(filepath=file_path)
-        else:
-            raise ValueError(f"Unsupported file format: {file_path}")
-
-        if not combine_obj_components:
-            loaded = bpy.context.view_layer.objects.active
-        else:
-            objects_after_import = set(bpy.context.scene.objects)
-            new_objects = objects_after_import - objects_before_import
-            bpy.ops.object.select_all(action='DESELECT')
-            for obj in new_objects:
-                obj.select_set(True)
-            try:
-                bpy.ops.object.join()
-            except Exception as e:
-                print(f"Error joining objects: {e}, ignoring the join operation")
-            loaded = bpy.context.view_layer.objects.active
-
-        # add texture for front 3d objects
-        if apply_3dfront_texture:
-            texture_path = os.path.join(os.path.split(file_path)[0], "texture.png")
-            if os.path.exists(texture_path):
-                apply_texture_to_object(loaded, texture_path)
-
-        bpy.ops.object.select_all(action='DESELECT')
-        loaded.select_set(True)
-        if recenter_mesh:
-            bpy.ops.object.origin_set(type='GEOMETRY_ORIGIN', center='BOUNDS')
-        # rotate the object according to pose["rotation"] (0, 90, 90)
-        # after preprocessing, the object faces -y axis by default
-        # make the object face +x by default (Blender rotates the object clockwise!)
-        if rotate_90:
-            bpy.ops.transform.rotate(value=-math.radians(90), orient_axis='Z')
-        # for i in range(3): assert loaded.rotation_euler[i] ==0
-        bpy.context.object.rotation_mode = "XYZ"
-        if "scale" in placed_assets[instance_id]:
-            loaded.scale = placed_assets[instance_id]["scale"]
-        #elif "scale" in task["assets"][instance_id]:
-        #    loaded.scale = placed_assets[instance_id]["scale"]
-        # TODO (Weiyu): Why are we reading both from the `placed_assets` dict and the `task["assets"]` dict? Can we remove one?
-        if isinstance(placed_assets[instance_id]["rotation"], float):
-            loaded.rotation_euler[-1] += np.deg2rad(placed_assets[instance_id]["rotation"])
-        else:
-            for i in range(3):
-                loaded.rotation_euler[i] += np.deg2rad(placed_assets[instance_id]["rotation"][i])
-        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-        for i in range(3): assert loaded.rotation_euler[i] ==0 
-        #bpy.ops.transform.rotate(value=math.radians(pose['rotation']['y']), orient_axis='Z')
-        # dim = get_dimensions_with_hierarchy(loaded)
-        # holo_dim = data_holodeck[obj['assetId']]['assetMetadata']['boundingBox']
-        xyz_location = placed_assets[instance_id]["position"]
-        # default place the object on the floor
-        if len(xyz_location) == 2:
-            xyz_location = [xyz_location[0], xyz_location[1], placed_assets[instance_id]["scale"] * placed_assets[instance_id]["assetMetadata"]["boundingBox"]["z"]/2]
-        loaded.location = xyz_location
+        loaded = _import_placed_asset_object(
+            instance_id,
+            asset,
+            placed_assets[instance_id],
+            rotate_90=rotate_90,
+            recenter_mesh=recenter_mesh,
+            apply_3dfront_texture=apply_3dfront_texture,
+            combine_obj_components=combine_obj_components,
+            bake_mesh_pose=True,
+        )
 
         if annotate_object:
             # create obb for the object
@@ -348,12 +385,12 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
                 asset_name = f"{asset['asset_var_name']}[{asset['instance_idx']}]"
 
             asset_dict[asset_count] = {
-                "position": asset_position, 
+                "position": asset_position,
                 "rotation": asset_rotation,
                 "size": asset_scale,
                 "name": asset_name,
-                "path": file_path, # "texture_path": texture_path,
-                "category": asset["category"]
+                "path": asset["path"],
+                "category": asset["category"],
             }
             asset_count += 1
 
@@ -372,6 +409,7 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
     output_images = []
     set_rendering_settings(high_res=high_res)
     visual_marks = dict()
+    annotations = []
     ### render top down images
     if render_top_down:
         ### setup camera
@@ -399,8 +437,10 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
         bpy.ops.render.render(write_still=True)
 
         if add_coordinate_mark:
-            _visual_marks = get_visual_marks(floor_vertices, bpy.context.scene, cam, interval=interval)
-            annotate_image_with_coordinates(image_path=render_path, visual_marks=_visual_marks, output_path=render_path, format="coordinate")
+            _grid_marks = get_visual_marks(floor_vertices, bpy.context.scene, cam, interval=interval)
+            annotations.append(
+                {"path": render_path, "format": "coordinate", "items": _grid_marks}
+            )
 
         _visual_marks = []
         if annotate_object:
@@ -446,12 +486,15 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
                 )
                 _visual_marks.append({"text": f"walls[{i}]", "pixel": (pixel_x, pixel_y), "end_arrow_pixel": (end_arrow_pixel_x, end_arrow_pixel_y), "color": "white"})
 
-        if adjust_top_down_angle is not None:
-            # asset centric mode
-            annotate_image_with_coordinates(image_path=render_path, visual_marks=_visual_marks, output_path=render_path, format="text", default_font_size=24)
-        else:
-            # scene centric mode
-            annotate_image_with_coordinates(image_path=render_path, visual_marks=_visual_marks, output_path=render_path, format="text", default_font_size=24 if default_font_size is None else default_font_size)
+        _text_font = 24 if adjust_top_down_angle is not None else (24 if default_font_size is None else default_font_size)
+        annotations.append(
+            {
+                "path": render_path,
+                "format": "text",
+                "items": list(_visual_marks),
+                "default_font_size": _text_font,
+            }
+        )
         output_images.append(render_path)
 
     ### render side images
@@ -478,11 +521,13 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
         bpy.ops.render.render(write_still=True)
         if add_coordinate_mark:
             visual_marks = get_visual_marks(floor_vertices, bpy.context.scene, cam, interval=2)
-            annotate_image_with_coordinates(image_path=render_path, visual_marks=visual_marks, output_path=render_path)
+            annotations.append(
+                {"path": render_path, "format": "coordinate", "items": visual_marks}
+            )
         output_images.append(render_path)
 
     if save_blend:
         bpy.ops.file.pack_all()
         bpy.ops.wm.save_as_mainfile(filepath=f"{save_dir}/scene.blend")
 
-    return output_images, visual_marks
+    return output_images, visual_marks, annotations
