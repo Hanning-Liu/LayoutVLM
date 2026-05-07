@@ -6,3 +6,5 @@ assets.zip
 scene.json
 Untitled
 .DS_Store
+eval-dataset/
+out/
