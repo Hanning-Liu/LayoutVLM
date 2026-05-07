@@ -1,7 +1,7 @@
 import torch
 import numpy as np
-from box_intersection_2d import oriented_box_intersection_2d
-from min_enclosing_box import smallest_bounding_box
+from .box_intersection_2d import oriented_box_intersection_2d
+from .min_enclosing_box import smallest_bounding_box
 
 def box2corners_th(box:torch.Tensor)-> torch.Tensor:
     """convert box coordinate to corners
@@ -77,6 +77,29 @@ def cal_giou(box1:torch.Tensor, box2:torch.Tensor, enclosing_type:str="smallest"
     w, h = enclosing_box(corners1, corners2, enclosing_type)
     area_c =  w*h
     giou_loss = 1. - iou + ( area_c - u )/area_c
+    return giou_loss, iou
+
+
+def cal_my_giou(
+    corners1: torch.Tensor,
+    corners2: torch.Tensor,
+    area1: torch.Tensor,
+    area2: torch.Tensor,
+    enclosing_type: str = "smallest",
+):
+    """GIoU from oriented 2D corners (LayoutVLM / grad solver path).
+
+    Args:
+        corners1: (B, N, 4, 2)
+        corners2: (B, N, 4, 2)
+        area1, area2: (B, N) polygon areas (w * h footprints)
+    """
+    inter_area, _ = oriented_box_intersection_2d(corners1, corners2)
+    u = area1 + area2 - inter_area
+    iou = inter_area / u.clamp(min=1e-8)
+    w, h = enclosing_box(corners1, corners2, enclosing_type)
+    area_c = w * h
+    giou_loss = 1.0 - iou + (area_c - u) / area_c.clamp(min=1e-8)
     return giou_loss, iou
 
 def cal_iou_3d(box3d1:torch.Tensor, box3d2:torch.Tensor, verbose=False):
