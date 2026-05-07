@@ -54,8 +54,20 @@ class Constraint:
 
 
 fixed_pointtt = Assets(description="global absolute marks", size=[0.01, 0.01, 0.01], placements=[])
+
+
+def _as_instance(x):
+    \"\"\"Unwrap `Assets` -> first `AssetInstance` when the LLM passes `table` instead of `table[0]`.\"\"\"
+    if isinstance(x, Assets):
+        if not x.placements:
+            raise ValueError("Assets used in constraints must have at least one placement")
+        return x.placements[0]
+    return x
+
+
 def get_instance_id(asset):
     global fixed_pointtt
+    asset = _as_instance(asset)
     if asset.instance_id is not None:
         return asset.instance_id
 
@@ -104,11 +116,14 @@ class ConstraintSolver:
                 )
             )
             return fixed_pointtt.placements[-1]
-        return asset
+        return _as_instance(asset)
     
     def point_towards(self, asset1: AssetInstance, asset2: Union[AssetInstance, tuple], angle=0):
-        asset1.instance_id = get_instance_id(asset1)
+        asset1 = _as_instance(asset1)
+        if not isinstance(asset2, tuple):
+            asset2 = _as_instance(asset2)
         asset2 = self.handle_fixed_pointtt(asset2)
+        asset1.instance_id = get_instance_id(asset1)
         asset2.instance_id = get_instance_id(asset2)
         self.constraints.append([
             Constraint("point_towards", angle=angle),
@@ -116,8 +131,11 @@ class ConstraintSolver:
         ])
 
     def distance_constraint(self, asset1: AssetInstance, asset2: Union[AssetInstance, tuple], min_distance=0, max_distance=10000, weight=1):
-        asset1.instance_id = get_instance_id(asset1)
+        asset1 = _as_instance(asset1)
+        if not isinstance(asset2, tuple):
+            asset2 = _as_instance(asset2)
         asset2 = self.handle_fixed_pointtt(asset2)
+        asset1.instance_id = get_instance_id(asset1)
         asset2.instance_id = get_instance_id(asset2)
         self.constraints.append([
             Constraint("distance_constraint", min_distance=min_distance, max_distance=max_distance, weight=weight),
@@ -125,6 +143,7 @@ class ConstraintSolver:
         ])
 
     def against_wall(self, asset1: AssetInstance, wall: Wall):
+        asset1 = _as_instance(asset1)
         asset1.instance_id = get_instance_id(asset1)
         wall.instance_id = get_instance_id(wall)
         self.constraints.append([
@@ -133,8 +152,10 @@ class ConstraintSolver:
         ])
 
     def on_top_of(self, asset1: AssetInstance, asset2: AssetInstance):
-        asset1.instance_id = get_instance_id(asset1)
+        asset1 = _as_instance(asset1)
+        asset2 = _as_instance(asset2)
         asset2 = self.handle_fixed_pointtt(asset2)
+        asset1.instance_id = get_instance_id(asset1)
         asset2.instance_id = get_instance_id(asset2)
         self.constraints.append([
             Constraint("on_top_of"),
@@ -142,6 +163,8 @@ class ConstraintSolver:
         ])
     
     def align_with(self, asset1: AssetInstance, asset2: AssetInstance, angle=0):
+        asset1 = _as_instance(asset1)
+        asset2 = _as_instance(asset2)
         asset1.instance_id = get_instance_id(asset1)
         asset2.instance_id = get_instance_id(asset2)
         self.constraints.append([
@@ -153,6 +176,8 @@ class ConstraintSolver:
         \"\"\"
         Add a constraint that asset1 should have the same x-coordinate as asset2.
         \"\"\"
+        asset1 = _as_instance(asset1)
+        asset2 = _as_instance(asset2)
         asset1.instance_id = get_instance_id(asset1)
         asset2.instance_id = get_instance_id(asset2)
         self.constraints.append([
@@ -164,6 +189,8 @@ class ConstraintSolver:
         \"\"\"
         Add a constraint that asset1 should have the same y-coordinate as asset2.
         \"\"\"
+        asset1 = _as_instance(asset1)
+        asset2 = _as_instance(asset2)
         asset1.instance_id = get_instance_id(asset1)
         asset2.instance_id = get_instance_id(asset2)
         self.constraints.append([

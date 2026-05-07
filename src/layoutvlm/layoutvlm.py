@@ -24,6 +24,17 @@ except Exception:
     render_existing_scene = None
     reset_blender = None
     _BLENDER_AVAILABLE = False
+
+from utils.blender_subprocess import is_blender_subprocess_available
+
+
+def _get_render_backend() -> str:
+    """Resolve at call time so callers can set LAYOUTVLM_BLENDER before LayoutVLM()."""
+    if _BLENDER_AVAILABLE:
+        return "inproc"
+    return "subprocess" if is_blender_subprocess_available() else "none"
+
+
 from collections import OrderedDict
 import prompts.layoutvlm.short_prompt as short_prompt
 import imageio
@@ -69,17 +80,22 @@ class LayoutVLM:
         self.convert_z_rot_degree_to_rpy_radians = convert_z_rot_degree_to_rpy_radians
         self.max_place_remaining_retry = max_place_remaining_retry
         self.blender_available = _BLENDER_AVAILABLE
+        self.render_backend = _get_render_backend()
 
-        # If Blender isn't available, ensure we don't attempt rendering paths.
-        if not self.blender_available and self.mode != "no_image":
+        # Image-conditioned layout needs either in-process bpy or an external `blender` binary.
+        if self.render_backend == "none" and self.mode != "no_image":
             print(
-                "Blender/bpy not available; switching to text-only mode (mode=no_image). "
-                "To enable image-conditioned layout, run in Blender's Python or ensure `import bpy` works."
+                "Blender rendering unavailable: no in-process bpy and no usable `blender` binary "
+                "(set LAYOUTVLM_BLENDER or install `blender` on PATH). Switching to text-only (mode=no_image)."
             )
             self.mode = "no_image"
-        elif self.blender_available and self.mode != "no_image":
-            print("Blender rendering available; image-conditioned mode enabled.")
-        
+        elif self.render_backend == "inproc" and self.mode != "no_image":
+            print("Blender rendering available (in-process bpy); image-conditioned mode enabled.")
+        elif self.render_backend == "subprocess" and self.mode != "no_image":
+            print(
+                "[render-subprocess] Image-conditioned layout will spawn Blender for intermediate scene renders."
+            )
+
 
 
     @staticmethod
@@ -94,11 +110,30 @@ class LayoutVLM:
             assert False
         elif self.visual_mark_mode == "new_coord":
             assert input_path is not None
-            from utils.plot_utils import annotate_image_with_coordinates
-            annotate_image_with_coordinates(input_path, visual_marks, output_path, default_color='red')
+            from utils.image_annotate import annotate_image_with_coordinates
+
+            annotate_image_with_coordinates(input_path, visual_marks, output_path)
         else:
             raise NotImplementedError(f"Visual mark mode {self.visual_mark_mode} not implemented")
 
+    def _render_scene(self, placed_assets, task, save_dir, render_kwargs):
+        """Top-down (+ side) renders: in-process bpy or external Blender subprocess."""
+        if _get_render_backend() == "inproc":
+            if render_existing_scene is None or reset_blender is None:
+                raise RuntimeError("in-process Blender render requested but bpy stack is unavailable")
+            output_images, visual_marks, annotations = render_existing_scene(
+                placed_assets, task, save_dir=save_dir, **render_kwargs
+            )
+            reset_blender()
+            from utils.image_annotate import apply_annotations
+
+            apply_annotations(annotations)
+            return output_images, visual_marks
+        if _get_render_backend() == "subprocess":
+            from utils.blender_subprocess import render_via_blender_subprocess
+
+            return render_via_blender_subprocess(placed_assets, task, save_dir, **render_kwargs)
+        raise RuntimeError("scene render requested but no Blender backend is configured")
 
     def get_asset_groups(self, task, MAX_ATTEMPTS=5, save_dir=None, include_position_in_prompt=False):
         ### old version with Pydantic
@@ -349,66 +384,58 @@ class LayoutVLM:
         #############################################################################
         current_scene_image_path_dict = {}
         if include_image:
-            if not self.blender_available or render_existing_scene is None or reset_blender is None:
+            if _get_render_backend() == "none":
                 print(
-                    "Note: include_image=True but Blender rendering utilities are unavailable; "
+                    "Note: include_image=True but no Blender backend is available; "
+                    "skipping scene image rendering for this group."
+                )
+                include_image = False
+            elif _get_render_backend() == "inproc" and (
+                render_existing_scene is None or reset_blender is None
+            ):
+                print(
+                    "Note: include_image=True but in-process Blender utilities failed to load; "
                     "skipping scene image rendering for this group."
                 )
                 include_image = False
             else:
+                common = dict(
+                    high_res=True,
+                    render_top_down=True,
+                    apply_3dfront_texture=True,
+                    combine_obj_components=True,
+                    fov_multiplier=1.3,
+                )
                 if self.mode == "no_visual_coordinate":
-                    output_images, visual_marks = render_existing_scene(
-                        placed_assets, task, save_dir=_save_dir,
-                        high_res=True, render_top_down=True,
-                        # For 3d front .obj
-                        apply_3dfront_texture=True, combine_obj_components=True,
-                        # this constant is used when generating training data. see front3d_v2.py
-                        fov_multiplier=1.3,
-                        # Disable all annotation flags
-                        add_coordinate_mark=False,
-                        annotate_object=True,
-                        annotate_wall=True,
-                        add_object_bbox=False
-                    )
+                    render_kwargs = {
+                        **common,
+                        "add_coordinate_mark": False,
+                        "annotate_object": True,
+                        "annotate_wall": True,
+                        "add_object_bbox": False,
+                    }
                 elif self.mode == "no_visual_assetname":
-                    output_images, visual_marks = render_existing_scene(
-                        placed_assets, task, save_dir=_save_dir,
-                        high_res=True, render_top_down=True,
-                        # For 3d front .obj
-                        apply_3dfront_texture=True, combine_obj_components=True,
-                        # this constant is used when generating training data. see front3d_v2.py
-                        fov_multiplier=1.3,
-                        # Disable all annotation flags
-                        add_coordinate_mark=True,
-                        annotate_object=False,
-                        annotate_wall=False,
-                        add_object_bbox=False
-                    )
+                    render_kwargs = {
+                        **common,
+                        "add_coordinate_mark": True,
+                        "annotate_object": False,
+                        "annotate_wall": False,
+                        "add_object_bbox": False,
+                    }
                 elif self.mode == "no_visual_mark":
-                    output_images, visual_marks = render_existing_scene(
-                        placed_assets, task, save_dir=_save_dir,
-                        high_res=True, render_top_down=True,
-                        # For 3d front .obj
-                        apply_3dfront_texture=True, combine_obj_components=True,
-                        # this constant is used when generating training data. see front3d_v2.py
-                        fov_multiplier=1.3,
-                        # Disable all annotation flags
-                        add_coordinate_mark=False,
-                        annotate_object=False,
-                        annotate_wall=False,
-                        add_object_bbox=False
-                    )
+                    render_kwargs = {
+                        **common,
+                        "add_coordinate_mark": False,
+                        "annotate_object": False,
+                        "annotate_wall": False,
+                        "add_object_bbox": False,
+                    }
                 else:
-                    output_images, visual_marks = render_existing_scene(
-                        placed_assets, task, save_dir=_save_dir,
-                        high_res=True, render_top_down=True,
-                        # For 3d front .obj
-                        apply_3dfront_texture=True, combine_obj_components=True,
-                        # this constant is used when generating training data. see front3d_v2.py
-                        fov_multiplier=1.3
-                    )
+                    render_kwargs = dict(common)
 
-                reset_blender()
+                output_images, _visual_marks = self._render_scene(
+                    placed_assets, task, _save_dir, render_kwargs
+                )
                 ### render the incomplete scene with the visual marks
                 for _image in output_images:
                     current_scene_image_path_dict[os.path.basename(_image).split('.')[0]] = _image

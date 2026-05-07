@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import os
 import json
 import argparse
 import numpy as np
 import collections
 from pathlib import Path
+from typing import Optional, Tuple
 from src.layoutvlm.scene import Scene
 from src.layoutvlm.layoutvlm import LayoutVLM
 from utils.placement_utils import get_random_placement
@@ -49,6 +52,12 @@ def parse_args():
         "--no_image",
         action="store_true",
         help="Force text-only mode (skip Blender rendering even if available).",
+    )
+    parser.add_argument(
+        "--blender_bin",
+        default=None,
+        metavar="PATH",
+        help="Blender executable for --with_image subprocess rendering (sets LAYOUTVLM_BLENDER).",
     )
     return parser.parse_args()
 
@@ -138,66 +147,113 @@ def prepare_task_assets(task, asset_dir):
 
     return task
 
-def main():
-    _load_dotenv_if_present()
-    args = parse_args()
-    # Prefer explicit DashScope args; fall back to env; finally allow deprecated flag.
-    dashscope_api_key = (
-        args.dashscope_api_key
+
+def resolve_dashscope_credentials(
+    dashscope_api_key: Optional[str] = None,
+    dashscope_base_url: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Merge CLI-style overrides with environment (same precedence as former main())."""
+    key = (
+        dashscope_api_key
         or os.getenv("DASHSCOPE_API_KEY")
-        or args.openai_api_key
+        or openai_api_key
         or os.getenv("OPENAI_API_KEY")
     )
-    if dashscope_api_key:
-        os.environ["DASHSCOPE_API_KEY"] = dashscope_api_key
-        # LangChain OpenAI provider reads OPENAI_API_KEY by default.
-        os.environ["OPENAI_API_KEY"] = dashscope_api_key
-
-    dashscope_base_url = (
-        args.dashscope_base_url
+    url = (
+        dashscope_base_url
         or os.getenv("DASHSCOPE_BASE_URL")
         or os.getenv("OPENAI_BASE_URL")
     )
+    return key, url
+
+
+def apply_dashscope_env(
+    dashscope_api_key: Optional[str] = None,
+    dashscope_base_url: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+) -> None:
+    """Write DashScope / OpenAI-compatible vars into os.environ for LLM clients."""
+    dashscope_api_key, dashscope_base_url = resolve_dashscope_credentials(
+        dashscope_api_key, dashscope_base_url, openai_api_key
+    )
+    if dashscope_api_key:
+        os.environ["DASHSCOPE_API_KEY"] = dashscope_api_key
+        os.environ["OPENAI_API_KEY"] = dashscope_api_key
     if dashscope_base_url:
         os.environ["DASHSCOPE_BASE_URL"] = dashscope_base_url
-        # OpenAI SDK + LangChain honor OPENAI_BASE_URL for compatible endpoints.
         os.environ["OPENAI_BASE_URL"] = dashscope_base_url
-    
-    # Create save directory
-    os.makedirs(args.save_dir, exist_ok=True)
-    
-    # Load scene configuration
-    with open(args.scene_json_file, 'r') as f:
+
+
+def run_single_layout(
+    *,
+    scene_json_file: str,
+    save_dir: str,
+    model: str,
+    asset_dir: str,
+    with_image: bool = False,
+    no_image: bool = False,
+    blender_bin: Optional[str] = None,
+) -> str:
+    """
+    Run LayoutVLM for one scene JSON and write layout.json under save_dir.
+    Caller should configure credentials (e.g. apply_dashscope_env) beforehand.
+    Returns path to layout.json.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    if blender_bin:
+        os.environ["LAYOUTVLM_BLENDER"] = blender_bin
+
+    with open(scene_json_file, "r") as f:
         scene_config = json.load(f)
-    
-    # Prepare assets
-    scene_config = prepare_task_assets(scene_config, args.asset_dir)
-    
-    # Initialize constraint solver
+
+    scene_config = prepare_task_assets(scene_config, asset_dir)
+
     mode = "one_shot"
-    if args.no_image:
+    if no_image:
         mode = "no_image"
     layout_solver = LayoutVLM(
         mode=mode,
-        save_dir=args.save_dir,
-        asset_source="objaverse",  # Default to objaverse
-        gpt_4o_model_name=args.model,
+        save_dir=save_dir,
+        asset_source="objaverse",
+        gpt_4o_model_name=model,
     )
-    if args.with_image and layout_solver.mode == "no_image":
+    if with_image and layout_solver.mode == "no_image":
         print(
-            "Note: --with_image requested but Blender rendering is not available; "
+            "Note: --with_image requested but Blender rendering is not available "
+            "(no bpy in this Python and no LAYOUTVLM_BLENDER / blender on PATH); "
             "falling back to no-image mode."
         )
-    
-    # Generate layout
+
     layout = layout_solver.solve(scene_config)
-    
-    # Save results
-    output_path = os.path.join(args.save_dir, 'layout.json')
-    with open(output_path, 'w') as f:
+
+    output_path = os.path.join(save_dir, "layout.json")
+    with open(output_path, "w") as f:
         json.dump(layout, f, indent=2)
-    
+
     print(f"Layout generated and saved to {output_path}")
+    return output_path
+
+
+def main():
+    _load_dotenv_if_present()
+    args = parse_args()
+    apply_dashscope_env(
+        args.dashscope_api_key,
+        args.dashscope_base_url,
+        args.openai_api_key,
+    )
+
+    run_single_layout(
+        scene_json_file=args.scene_json_file,
+        save_dir=args.save_dir,
+        model=args.model,
+        asset_dir=args.asset_dir,
+        with_image=args.with_image,
+        no_image=args.no_image,
+        blender_bin=args.blender_bin,
+    )
 
 if __name__ == "__main__":
     main() 
