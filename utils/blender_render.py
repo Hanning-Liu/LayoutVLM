@@ -1,23 +1,29 @@
-import argparse, sys, os, math, re
-import bpy
-import bmesh
-from bpy_extras.image_utils import load_image
 import math
 import numpy as np
 import os
 import bpy
-import numpy as np
-from scipy.signal import correlate2d
-from scipy.ndimage import shift
-import json
 from mathutils import Vector
-from utils.blender_utils import reset_scene, setup_background, create_wall_mesh, add_material, setup_camera, load_hdri, set_rendering_settings, apply_texture_to_object
-import utils.transformations as tra
+from utils.blender_utils import setup_background, create_wall_mesh, add_material, setup_camera, load_hdri, set_rendering_settings, apply_texture_to_object
 from utils.colors import get_categorical_colors
-import trimesh
-import cv2
 from utils.blender_utils import get_pixel_coordinates, reset_blender
-from utils.plot_utils import annotate_image_with_coordinates
+
+
+def _serialize_coordinate_marks(visual_marks):
+    return [
+        {"coord": [coord[0], coord[1]], "pixel": [pixel[0], pixel[1]]}
+        for coord, pixel in visual_marks.items()
+    ]
+
+
+def _serialize_text_marks(visual_marks):
+    serialized = []
+    for mark in visual_marks:
+        item = dict(mark)
+        item["pixel"] = [item["pixel"][0], item["pixel"][1]]
+        if "end_arrow_pixel" in item:
+            item["end_arrow_pixel"] = [item["end_arrow_pixel"][0], item["end_arrow_pixel"][1]]
+        serialized.append(item)
+    return serialized
 
 
 def get_visual_marks(floor_vertices, scene, cam, interval=1):
@@ -172,6 +178,8 @@ def add_coordinate_frame(location=Vector((0, 0, 0.)), scale=1.0):
 
 
 def show_current_render(save_dir):
+    import cv2
+
     render_path = f"{save_dir}/tmp.png"
     bpy.context.scene.render.filepath = render_path
     bpy.ops.render.render(write_still=True)
@@ -185,7 +193,8 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
                           annotate_object=True, annotate_wall=True, render_top_down=True, adjust_top_down_angle=None, high_res=False, rotate_90=True,
                           apply_3dfront_texture=False, recenter_mesh=True, fov_multiplier=1.1, default_font_size=None,
                           combine_obj_components=False, side_view_phi=45, side_view_indices=[3], save_blend=False,
-                          add_object_bbox=False, ignore_asset_instance_idx=False, floor_material="Travertine008"):
+                          add_object_bbox=False, ignore_asset_instance_idx=False, floor_material="Travertine008",
+                          annotate_in_blender=True, return_annotation_payload=False):
     """
     :param placed_assets: the set of assets that have been placed in the scene / to be rendered
     :param task: just for getting the boundary
@@ -372,6 +381,12 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
     output_images = []
     set_rendering_settings(high_res=high_res)
     visual_marks = dict()
+    annotation_payload = {
+        "topdown_coordinate_marks": [],
+        "topdown_text_marks": [],
+        "topdown_text_font_size": None,
+        "side_coordinate_marks": {},
+    }
     ### render top down images
     if render_top_down:
         ### setup camera
@@ -399,10 +414,14 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
         bpy.ops.render.render(write_still=True)
 
         if add_coordinate_mark:
-            _visual_marks = get_visual_marks(floor_vertices, bpy.context.scene, cam, interval=interval)
-            annotate_image_with_coordinates(image_path=render_path, visual_marks=_visual_marks, output_path=render_path, format="coordinate")
+            coord_marks = get_visual_marks(floor_vertices, bpy.context.scene, cam, interval=interval)
+            if annotate_in_blender:
+                from utils.plot_utils import annotate_image_with_coordinates
+                annotate_image_with_coordinates(image_path=render_path, visual_marks=coord_marks, output_path=render_path, format="coordinate")
+            else:
+                annotation_payload["topdown_coordinate_marks"] = _serialize_coordinate_marks(coord_marks)
 
-        _visual_marks = []
+        text_marks = []
         if annotate_object:
             for asset_name in asset_dict:
                 asset_data = asset_dict[asset_name]
@@ -416,7 +435,7 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
                         asset_data["position"][2]
                     ]
                 )
-                _visual_marks.append({ "text": asset_data["name"], "pixel": (pixel_x, pixel_y), "end_arrow_pixel": (end_arrow_pixel_x, end_arrow_pixel_y)})
+                text_marks.append({ "text": asset_data["name"], "pixel": (pixel_x, pixel_y), "end_arrow_pixel": (end_arrow_pixel_x, end_arrow_pixel_y)})
                 print(f"Asset {asset_data['name']} is at pixel ({pixel_x}, {pixel_y})")
 
         if annotate_wall:
@@ -444,14 +463,24 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
                         0
                     ]
                 )
-                _visual_marks.append({"text": f"walls[{i}]", "pixel": (pixel_x, pixel_y), "end_arrow_pixel": (end_arrow_pixel_x, end_arrow_pixel_y), "color": "white"})
+                text_marks.append({"text": f"walls[{i}]", "pixel": (pixel_x, pixel_y), "end_arrow_pixel": (end_arrow_pixel_x, end_arrow_pixel_y), "color": "white"})
 
         if adjust_top_down_angle is not None:
-            # asset centric mode
-            annotate_image_with_coordinates(image_path=render_path, visual_marks=_visual_marks, output_path=render_path, format="text", default_font_size=24)
+            text_font_size = 24
         else:
-            # scene centric mode
-            annotate_image_with_coordinates(image_path=render_path, visual_marks=_visual_marks, output_path=render_path, format="text", default_font_size=24 if default_font_size is None else default_font_size)
+            text_font_size = 24 if default_font_size is None else default_font_size
+        if annotate_in_blender:
+            from utils.plot_utils import annotate_image_with_coordinates
+            annotate_image_with_coordinates(
+                image_path=render_path,
+                visual_marks=text_marks,
+                output_path=render_path,
+                format="text",
+                default_font_size=text_font_size,
+            )
+        else:
+            annotation_payload["topdown_text_marks"] = _serialize_text_marks(text_marks)
+            annotation_payload["topdown_text_font_size"] = text_font_size
         output_images.append(render_path)
 
     ### render side images
@@ -478,11 +507,18 @@ def render_existing_scene(placed_assets, task, save_dir, add_hdri=True, topdown_
         bpy.ops.render.render(write_still=True)
         if add_coordinate_mark:
             visual_marks = get_visual_marks(floor_vertices, bpy.context.scene, cam, interval=2)
-            annotate_image_with_coordinates(image_path=render_path, visual_marks=visual_marks, output_path=render_path)
+            if annotate_in_blender:
+                from utils.plot_utils import annotate_image_with_coordinates
+                annotate_image_with_coordinates(image_path=render_path, visual_marks=visual_marks, output_path=render_path)
+            else:
+                annotation_payload["side_coordinate_marks"][render_path] = _serialize_coordinate_marks(visual_marks)
         output_images.append(render_path)
 
     if save_blend:
         bpy.ops.file.pack_all()
         bpy.ops.wm.save_as_mainfile(filepath=f"{save_dir}/scene.blend")
 
+    if return_annotation_payload:
+        serialized_visual_marks = _serialize_coordinate_marks(visual_marks)
+        return output_images, serialized_visual_marks, annotation_payload
     return output_images, visual_marks

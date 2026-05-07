@@ -16,8 +16,7 @@ import base64
 import collections
 from utils.placement_utils import get_random_placement
 from prompts.layoutvlm import base_prompt
-from utils.blender_render import render_existing_scene
-from utils.blender_utils import reset_blender
+from utils.render_bridge import render_existing_scene
 from collections import OrderedDict
 import prompts.layoutvlm.short_prompt as short_prompt
 import imageio
@@ -371,7 +370,6 @@ class LayoutVLM:
                     # this constant is used when generating training data. see front3d_v2.py
                     fov_multiplier=1.3
                 )
-            reset_blender()
             ### render the incomplete scene with the visual marks
             for _image in output_images:
                 current_scene_image_path_dict[os.path.basename(_image).split('.')[0]] = _image

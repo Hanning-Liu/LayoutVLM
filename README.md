@@ -10,17 +10,28 @@
 ## Installation
 
 1. Clone this repository
-2. Install dependencies (python 3.10):
+2. Install conda/runtime dependencies (python 3.10):
+
 ```bash
 pip install -r requirements.txt
 ```
-3. Install Rotated IOU Loss (https://github.com/lilanxiao/Rotated\_IoU)
+
+3. Install Blender (desktop or headless package) and make sure the `blender` executable is available in PATH.
+  - If Blender is not in PATH, set `BLENDER_BIN` to the executable path, e.g.:
+
+```bash
+export BLENDER_BIN=/path/to/blender
+```
+
+4. Install Rotated IOU Loss (https://github.com/lilanxiao/Rotated\_IoU)
+
 ```
 cd third_party/Rotated_IoU/cuda_op
 python setup.py install
-````
+```
 
 ## Data preprocessing
+
 1. Download the dataset https://drive.google.com/file/d/1WGbj8gWn-f-BRwqPKfoY06budBzgM0pu/view?usp=sharing
 2. Unzip it.
 
@@ -29,6 +40,7 @@ Refer to https://github.com/allenai/Holodeck and https://github.com/allenai/obja
 ## Usage
 
 1. Prepare a scene configuration JSON file of Objaverse assets with the following structure:
+
 ```json
 {
     "task_description": ...,
@@ -53,14 +65,23 @@ Refer to https://github.com/allenai/Holodeck and https://github.com/allenai/obja
 ```
 
 2. Run LayoutVLM:
+
 ```bash
 python main.py --scene_json_file path/to/scene.json --openai_api_key your_api_key
 ```
 
+### Python environment isolation
+
+- All non-rendering logic (task preparation, grouping, optimization, prompting, I/O) runs in your conda Python environment.
+- Rendering is executed in a separate Blender subprocess (`blender --background --python ...`) and therefore uses Blender's bundled Python interpreter.
+- This avoids importing `bpy` into the conda runtime and prevents conda/Blender Python package conflicts.
+
 ## Output
+
 The script will generate a layout.json file in the specified save directory containing the optimized positions and orientations of all assets in the scene.
 
 ## BibTeX
+
 ```bibtex
 @inproceedings{sun2025layoutvlm,
   title={Layoutvlm: Differentiable optimization of 3d layout via vision-language models},
@@ -70,3 +91,4 @@ The script will generate a layout.json file in the specified save directory cont
   year={2025}
 }
 ```
+
