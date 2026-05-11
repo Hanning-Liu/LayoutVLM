@@ -77,6 +77,7 @@ WorkerJob = Tuple[
     str,
     str,
     bool,
+    str,
 ]
 
 
@@ -251,6 +252,7 @@ def _worker_mp(job: WorkerJob) -> Tuple[str, Optional[str]]:
         traj_subdir,
         conda_exe,
         traj_via_conda_run,
+        layout_mode,
     ) = job
     try:
         os.chdir(REPO_ROOT)
@@ -274,6 +276,7 @@ def _worker_mp(job: WorkerJob) -> Tuple[str, Optional[str]]:
             with_image=with_image,
             no_image=no_image,
             blender_bin=blender_bin,
+            layout_mode=layout_mode,
         )
         if post_final or post_traj:
             if not blender_bin:
@@ -335,6 +338,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=None, help="Process at most this many scenes")
     p.add_argument("--model", default="qwen3.6-plus", help="VLM model name")
     p.add_argument("--asset_dir", default="./objaverse_processed", help="Objaverse processed root")
+    p.add_argument(
+        "--layout_mode",
+        default="default",
+        choices=("default", "one_shot", "semantic", "finetuned"),
+        help=(
+            "Same as main.py --layout_mode: 'semantic'/'finetuned' runs LLM grouping (bed+nightstand, desk+chair, …) "
+            "before per-group placement; 'default' keeps legacy one_shot (often only group_0)."
+        ),
+    )
     img = p.add_mutually_exclusive_group()
     img.add_argument(
         "--with_image",
@@ -534,6 +546,7 @@ def main() -> int:
                 str(args.post_traj_out_subdir),
                 conda_exe_resolved,
                 traj_via_conda_run,
+                str(args.layout_mode),
             )
         )
 
@@ -542,7 +555,7 @@ def main() -> int:
         f"workers={args.workers} results_root={results_root} resume={bool(args.resume)} "
         f"checkpoint={checkpoint_path or 'off'} "
         f"post_final_blender={bool(args.post_final_blender)} post_trajectory={bool(args.post_trajectory)} "
-        f"traj_via_conda_run={traj_via_conda_run}",
+        f"traj_via_conda_run={traj_via_conda_run} layout_mode={args.layout_mode}",
         file=sys.stderr,
         flush=True,
     )

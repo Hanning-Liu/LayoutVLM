@@ -118,6 +118,7 @@ class Wall:
             self.device = 'cpu'
         self.corner1 = vertices[0]
         self.corner2 = vertices[1]
+        self.onCeiling = False
         self.optimize = 0
         self.position = torch.tensor(
             [(self.corner1[0] + self.corner2[0])/2, (self.corner1[1] + self.corner2[1])/2, 0],

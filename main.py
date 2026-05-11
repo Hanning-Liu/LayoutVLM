@@ -59,7 +59,37 @@ def parse_args():
         metavar="PATH",
         help="Blender executable for --with_image subprocess rendering (sets LAYOUTVLM_BLENDER).",
     )
+    parser.add_argument(
+        "--layout_mode",
+        default="default",
+        choices=("default", "one_shot", "semantic", "finetuned"),
+        help=(
+            "Layout solving strategy. "
+            "'default' matches legacy behavior: one_shot with images, or no_image when --no_image. "
+            "'semantic' / 'finetuned' runs LLM asset grouping first (desk+chair, bed+nightstand, …), "
+            "then places group by group (writes grouping.json). "
+            "'one_shot' places all assets in one stage (often only group_0)."
+        ),
+    )
     return parser.parse_args()
+
+
+def resolve_layout_mode(layout_mode: str, *, no_image: bool) -> str:
+    """
+    Map CLI layout_mode + flags -> LayoutVLM.mode.
+
+    Precedence: --no_image always selects text-only ``no_image`` (still uses semantic grouping in solve()).
+    """
+    if no_image:
+        return "no_image"
+    key = (layout_mode or "default").strip().lower()
+    if key in ("default", ""):
+        return "one_shot"
+    if key == "semantic":
+        return "finetuned"
+    if key in ("one_shot", "finetuned"):
+        return key
+    raise ValueError(f"unsupported layout_mode: {layout_mode!r}")
 
 def prepare_task_assets(task, asset_dir):
     """
@@ -194,6 +224,7 @@ def run_single_layout(
     with_image: bool = False,
     no_image: bool = False,
     blender_bin: Optional[str] = None,
+    layout_mode: str = "default",
 ) -> str:
     """
     Run LayoutVLM for one scene JSON and write layout.json under save_dir.
@@ -210,9 +241,7 @@ def run_single_layout(
 
     scene_config = prepare_task_assets(scene_config, asset_dir)
 
-    mode = "one_shot"
-    if no_image:
-        mode = "no_image"
+    mode = resolve_layout_mode(layout_mode, no_image=no_image)
     layout_solver = LayoutVLM(
         mode=mode,
         save_dir=save_dir,
@@ -253,6 +282,7 @@ def main():
         with_image=args.with_image,
         no_image=args.no_image,
         blender_bin=args.blender_bin,
+        layout_mode=args.layout_mode,
     )
 
 if __name__ == "__main__":
